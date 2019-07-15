@@ -1,0 +1,342 @@
+<project name="ESB" default="empty" basedir="." xmlns:if="ant:if" xmlns:unless="ant:unless">
+  <include file="${basedir}/utils.xml"/>
+  
+  <property environment="env"/>
+  <property file="${basedir}/build.properties"/>
+  
+  <!-- Default value for the workspace dir -->
+  <property name="eclipse.workspace.dir" value="${projects.dir}"/>
+  
+  <mkdir dir="${eclipse.workspace.dir}"/>
+    
+  <!-- Default value for the build dir -->
+  <property name="build.dir" value="${eclipse.workspace.dir}/ANT_BUILD"/>
+  
+  <property name="build.output.dir" value="${build.dir}/Output"/>
+  <property name="tmp.build.dir" value="${build.dir}/tmp"/>
+  
+  <property name="previous.svn.paths.file" value="${build.dir}/previousSvnPaths.properties"/>
+  
+  <!-- Default value to disable processing of affected projects -->
+  <property name="include.affected.projects" value="false"/>
+  
+  <target name="init_build_dir">
+    <!-- Clear and create the output dir -->
+    <delete dir="${build.output.dir}"/>
+    <mkdir dir="${build.output.dir}"/>
+    
+    <!-- Clear and create tmp dir -->
+    <delete dir="${tmp.build.dir}"/>
+    <mkdir dir="${tmp.build.dir}"/>
+  </target>
+  
+  <target name="init_projects">
+    <failOnUndefinedProperty propertyName="projects.dir"/>
+    
+    <!-- The "project.names" property is set with all projects of the given projects.dir.
+         If the project.names is already set from caller, it is not set here -->
+    <echo message="Property 'project.names' is not set. All projects found in ${projects.dir} will be processed"
+          unless:set="project.names"/>
+    
+    <pathconvert pathsep=","
+                 property="project.names">
+      <fileset dir="${projects.dir}"
+               includes="*/.project"/>
+      <regexpmapper from="^.+([^\\/]+)[\\/].project$" to="\1"/>
+    </pathconvert>
+  </target>
+  
+  <target name="validate_svn_properties">
+    <if> <available file="${previous.svn.paths.file}"/>
+      <then>
+        <failOnUndefinedProperty propertyName="svn.user"/>
+        <failOnUndefinedProperty propertyName="svn.password"/>
+      </then>
+    </if>
+  </target>
+  
+  <target name="filter_changed_related_projects"
+          depends="init_projects, validate_svn_properties">
+    <groovy>
+      <![CDATA[
+      import intrasoft.Svn
+      import intrasoft.esb.EsbDependenciesResolver
+      import intrasoft.esb.EsbPackager
+      
+      def includeAffectedProjects=(project.getProperty('include.affected.projects')=='true')
+      def baseDir=project.getProperty('basedir')
+      def svnExecutable=project.getProperty('svn.executable')
+      def projectsDir=project.getProperty('projects.dir')
+      def projectNames=project.getProperty('project.names')
+      def svnPropertiesFilePath=project.getProperty('previous.svn.paths.file')
+      
+      def projectNamesList=(projectNames.split(','))*.trim()
+      
+      Properties svnProps=new Properties()
+      File svnPropertiesFile=new File(svnPropertiesFilePath)
+      
+      //Filter the projects list to keep only those with SVN modifications
+      def changedProjectNamesList=[]
+      if (svnPropertiesFile.exists()) {
+        println "Getting projects with SVN modifications (Previous versions are retrieved from file ${svnPropertiesFilePath})"
+        
+        def svnUser=project.getProperty('svn.user')
+        def svnPassword=project.getProperty('svn.password')
+        
+        def svn=new Svn(svnExecutable, svnUser, svnPassword)
+        
+        def svnDiffIgnoredPathsRegex=project.getProperty('svn.diff.ignored.paths.regex.list')
+        def svnDiffIgnoredPathsRegexList=(svnDiffIgnoredPathsRegex.split(','))*.trim()
+        
+        //Load SVN info properties from existing property file
+        svnProps.load(svnPropertiesFile.newDataInputStream())
+        
+        projectNamesList.each { projectName ->
+          String projectPath="${projectsDir}/${projectName}"
+          String previousSvnUrl=svnProps.getProperty(projectName)
+          
+          if (svn.svnFileChangesExist(previousSvnUrl, null, projectPath, null, svnDiffIgnoredPathsRegexList)) {
+            changedProjectNamesList.add(projectName)
+          }
+        }
+      }
+      else {
+        println "Property file ${svnPropertiesFilePath} does not exist, filtering of projects with SVN diff is skipped"
+        changedProjectNamesList=projectNamesList
+      }
+      
+      //Get ordered list of all the related projects for the projects of the changedProjectNamesList
+      def orderedRelatedProjectsList=[]
+      
+      if (changedProjectNamesList.size()>0) {
+        def esbDependenciesResolver=new EsbDependenciesResolver(projectsDir)
+        if (includeAffectedProjects) {
+          println 'The affected projects (those that directly/indirectly depend on the modified projects) will also be processed'
+          orderedRelatedProjectsList=esbDependenciesResolver.getOrderedRelatedProjects(changedProjectNamesList)
+        } else {
+          println 'The affected projects (those that directly/indirectly depend on the modified projects) will NOT be processed'
+          orderedRelatedProjectsList=esbDependenciesResolver.getOrderedDependencyProjects(changedProjectNamesList)
+        }
+      }
+      
+      println "changedProjectNamesList: ${changedProjectNamesList}"
+      println "orderedRelatedProjectsList: ${orderedRelatedProjectsList}"
+      
+      project.setProperty('filtered.project.names', orderedRelatedProjectsList.join(','))
+      project.setProperty('changed.project.names', changedProjectNamesList.join(','))
+      
+      if (orderedRelatedProjectsList.size()>0) {
+        project.setProperty('filtered.projects.found', 'true')
+      }
+      ]]>
+    </groovy>
+  </target>
+  
+  <target name="create_patching_list"
+          depends="init_build_dir, init_projects, filter_changed_related_projects"
+          description="Create patching list for input projects">
+    <groovy>
+      import intrasoft.esb.EsbPackager
+      
+      def projectsDir=project.getProperty('projects.dir')
+      def outputDir=project.getProperty('build.output.dir')
+      
+      def projectNames=project.getProperty('changed.project.names')
+      def projectNamesList=(projectNames.split(','))*.trim()
+      
+      new EsbPackager(projectsDir).createPatchingListFile(projectNamesList, "${outputDir}/patchingList.txt")
+    </groovy>
+  </target>
+  
+  <target name="clear_workspace">
+    <!-- Get the absolute paths of the workspace and the projects dir to compare them -->
+    <property name="workspace.absolute.path" location="${eclipse.workspace.dir}"/>
+    <property name="projects.dir.absolute.path" location="${projects.dir}"/>
+    
+    <fail message="The projects dir '${projects.dir.absolute.path}' is the same with the workspace dir. Cannot clear the workspace">
+      <condition>
+        <equals arg1="${workspace.absolute.path}" arg2="${projects.dir.absolute.path}"/>
+      </condition>
+    </fail>
+    
+    <printTimeMessage message="Deleting workspace ${eclipse.workspace.dir}"/>
+    <delete dir="${eclipse.workspace.dir}"/>
+  </target>
+  
+  <target name="create_workspace">
+    <mkdir dir="${eclipse.workspace.dir}"/>
+  </target>
+  
+  <target name="prepare_workspace"
+          depends="create_workspace, init_projects, filter_changed_related_projects"
+          if="${filtered.projects.found}">
+    
+    <!-- First add files in each project's .settings directory if it does not exist.
+         This is required to import in workspace that is not the same with the projects dir.
+         It must be executed before the runAntWid.bat to avoid errors when opening the workspace in the Integration Designer.
+    -->
+    <for list="${filtered.project.names}"
+         param="projectName"
+         trim="true"
+         delimiter=",">
+      <sequential>
+        <if> <not> <available file="${projects.dir}/@{projectName}/.settings" type="dir"/> </not>
+          <then>
+            <echo message="Adding .settings from template for @{projectName}"/>
+            
+            <mkdir dir="${projects.dir}/@{projectName}/.settings"/>
+            
+            <copy todir="${projects.dir}/@{projectName}/.settings">
+              <filterchain>
+                <replacetokens>
+                  <token key="PROJECT_NAME" value="@{projectName}"/>
+                </replacetokens>
+              </filterchain>
+              <fileset dir="${basedir}/settingsTemplate"/>
+            </copy>
+          </then>
+        </if>
+      </sequential>
+    </for>
+  </target>
+  
+  <!-- Executes Ant script in Integration Designer -->
+  <target name="import_dependencies"
+          depends="init_build_dir, init_projects, filter_changed_related_projects, prepare_workspace">
+    <if> <istrue value="${filtered.projects.found}"/>
+      <then>
+        <local name="projects.property.file"/>
+        <property name="projects.property.file" value="${build.dir}/projects.properties"/>
+        <delete file="${projects.property.file}"/>
+        
+        <!-- Store the project.names to a file to avoid errors for large command on Windows when hundreds of projects are processed -->
+        <propertyfile file="${projects.property.file}">
+          <entry key="project.names" value="${filtered.project.names}"/>
+        </propertyfile>
+        
+        <exec executable="${basedir}/runAntWid.bat"
+              failonerror="true"
+              dir="${tmp.build.dir}">
+          <arg value="-f"/>
+          <arg value="${basedir}/build-IDE.xml"/>
+          <arg value="-Dprojects.dir=${projects.dir}"/>
+          <arg value="-Dbuild.output.dir=${build.output.dir}"/>
+          <arg value="-propertyfile"/>
+          <arg value="${projects.property.file}"/>
+          <arg value="import"/>
+          <env key="BUILD_SCRIPTS_DIR" value="${basedir}/.."/>
+          <env key="INTEGRATION_DESIGNER_DIR" value="${integration.designer.dir}"/>
+          <env key="WORKSPACE" value="${eclipse.workspace.dir}"/>
+        </exec>
+      </then>
+      <else>
+        <echo message="No changed projects exist, skipping import"/>
+      </else>
+    </if>
+  </target>
+  
+  <!-- Executes Ant script in Integration Designer -->
+  <target name="build"
+          depends="init_build_dir, init_projects, filter_changed_related_projects, prepare_workspace, create_patching_list">
+    <failOnUndefinedProperty propertyName="integration.designer.dir"/>
+    
+    <if> <istrue value="${filtered.projects.found}"/>
+      <then>
+        <local name="projects.property.file"/>
+        <property name="projects.property.file" value="${build.dir}/projects.properties"/>
+        <delete file="${projects.property.file}"/>
+        
+        <!-- Store the project.names to a file to avoid errors for large command on Windows when hundreds of projects are processed -->
+        <propertyfile file="${projects.property.file}">
+          <entry key="project.names" value="${filtered.project.names}"/>
+        </propertyfile>
+        
+        <exec executable="${basedir}/runAntWid.bat"
+              failonerror="true"
+              dir="${tmp.build.dir}">
+          <arg value="-f"/>
+          <arg value="${basedir}/build-IDE.xml"/>
+          <arg value="-Dprojects.dir=${projects.dir}"/>
+          <arg value="-Dbuild.output.dir=${build.output.dir}"/>
+          <arg value="-propertyfile"/>
+          <arg value="${projects.property.file}"/>
+          <arg value="build"/>
+          <env key="BUILD_SCRIPTS_DIR" value="${basedir}/.."/>
+          <env key="INTEGRATION_DESIGNER_DIR" value="${integration.designer.dir}"/>
+          <env key="WORKSPACE" value="${eclipse.workspace.dir}"/>
+        </exec>
+        
+        <property name="post.build.script" value="${basedir}/postBuildScripts/init.bat"/>
+        <dirname property="post.build.script.dir" file="${post.build.script}"/>
+        
+        <echo message="Execute post build script ${post.build.script}"/>
+        
+        <exec executable="${post.build.script}"
+              failonerror="true"
+              dir="${post.build.script.dir}">
+          <env key="WORKSPACE" value="${eclipse.workspace.dir}"/>
+        </exec>
+      </then>
+      <else>
+        <echo message="No changed projects exist, skipping build"/>
+      </else>
+    </if>
+  </target>
+  
+  <target name="revert_update_projects_dir"
+          depends="init_projects"
+          if="${revert.update.svn}">
+    <echo message="SVN revert and update of the projects dir"/>
+    <svnRevert path="${projects.dir}"/>
+    <svnUpdateCachedAuth path="${projects.dir}"/>
+  </target>
+  
+  <target name="clean_build"
+          depends="clear_workspace, revert_update_projects_dir, import_dependencies, build">
+  </target>
+  
+  <target name="log_svn_paths"
+          depends="init_build_dir, filter_changed_related_projects">
+    <groovy>
+      import intrasoft.Svn
+      
+      def baseDir=project.getProperty('basedir')
+      def svnExecutable=project.getProperty('svn.executable')
+      def projectsDir=project.getProperty('projects.dir')
+      def projectNames=project.getProperty('filtered.project.names')
+      def svnPropertiesFilePath=project.getProperty('previous.svn.paths.file')
+      def svnUser=project.getProperty('svn.user')
+      def svnPassword=project.getProperty('svn.password')
+      
+      if (projectNames.size()==0) {
+        println 'No changed projects exist, skipping SVN paths process'
+        return
+      }
+      
+      def projectNamesList=(projectNames.split(','))*.trim()
+      
+      
+      def svn=new Svn(svnExecutable, svnUser, svnPassword)
+      
+      //Load SVN info properties from existing property file
+      Properties svnProps=new Properties()
+      File svnPropertiesFile=new File(svnPropertiesFilePath)
+      if (svnPropertiesFile.exists()) {
+        svnProps.load(svnPropertiesFile.newDataInputStream())
+      }
+      else {
+        println "Property file ${svnPropertiesFilePath} does not exist, it will be created"
+      }
+      
+      projectNamesList.each { projectName ->
+        def projectPath="${projectsDir}/${projectName}"
+        def svnInfo=svn.getSvnInfoXml(projectPath, false)
+        def url=svn.getUrlWithRevision(svnInfo.entry.url.text(), svnInfo.entry.commit.@revision)
+        svnProps.setProperty(projectName, url)
+      }
+      
+      //Update (or create if not existing) property file with SVN paths and revisions of processed projects
+      svnProps.store(svnPropertiesFile.newWriter(), null)
+    </groovy>
+  </target>
+</project>

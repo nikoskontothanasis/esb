@@ -1,0 +1,175 @@
+<!-- Define utility tasks (taskdefs, macrodefs, scriptdefs etc.) -->
+<project default="NONE" basedir="." xmlns:if="ant:if" xmlns:unless="ant:unless">
+  <taskdef resource="net/sf/antcontrib/antlib.xml">
+    <classpath>
+      <pathelement location="${basedir}/additionalAntLibs/ant-contrib-1.0b3.jar"/>
+    </classpath>
+  </taskdef>
+  
+  <taskdef name="groovy"
+           classname="org.codehaus.groovy.ant.Groovy">
+    <classpath>
+      <pathelement location="${basedir}/additionalAntLibs/groovy-all-2.4.15.jar"/>
+      <pathelement location="${basedir}/../groovyScripts"/>
+    </classpath>
+  </taskdef>
+  
+  <macrodef name="printTimeMessage">
+    <attribute name="message" default="Time"/>
+    <sequential>
+      <local name="current.time"/>
+      <tstamp>
+        <format property="current.time" pattern="HH:mm:ss"/>
+      </tstamp>
+      
+      <echo message="@{message}: ${current.time}"/>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="failOnUndefinedProperty">
+    <attribute name="propertyName"/>
+    <attribute name="allowEmptyProperty" default="false"/>
+    <attribute name="allowUnresolvedProperty" default="false"/>
+    <sequential>
+      <fail message="Property '@{propertyName}' is not set" unless="@{propertyName}"/>
+      
+      <fail message="Property '@{propertyName}' is empty">
+        <condition>
+          <and>
+            <isfalse value="@{allowEmptyProperty}"/>
+            <length string="${@{propertyName}}" trim="true" when="equal" length="0"/>
+          </and>
+        </condition>
+      </fail>
+      
+      <fail message="Property '@{propertyName}' contains a '${...}' sequence">
+        <condition>
+          <and>
+            <isfalse value="@{allowUnresolvedProperty}"/>
+            <matches string="${@{propertyName}}"
+                     pattern="\$\{\S+\}"
+                     singleline="false"/>
+          </and>
+        </condition>
+      </fail>
+      
+      <fail message="Property '@{propertyName}' contains a '@{...}' sequence">
+        <condition>
+          <and>
+            <isfalse value="@{allowUnresolvedProperty}"/>
+            <matches string="${@{propertyName}}"
+                     pattern="@\{\S+\}"
+                     singleline="false"/>
+          </and>
+        </condition>
+      </fail>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="svnList">
+    <attribute name="path"/>
+    <attribute name="revision" default=""/>
+    <attribute name="recursive" default="false"/>
+    <attribute name="verbose" default="false"/>
+    <attribute name="xml" default="false"/>
+    <attribute name="outputPropertyName"/>
+    <sequential>
+      <local name="svnList.recursive"/>
+      <property name="svnList.recursive" value="--recursive" if:true="@{recursive}"/>
+      <property name="svnList.recursive" value=""/>
+      
+      <local name="svnList.verbose"/>
+      <property name="svnList.verbose" value="--verbose" if:true="@{verbose}"/>
+      <property name="svnList.verbose" value=""/>
+      
+      <local name="svnList.xml"/>
+      <property name="svnList.xml" value="--xml" if:true="@{xml}"/>
+      <property name="svnList.xml" value=""/>
+      
+      <local name="revision"/>
+      <propertyregex property="revision"
+                     input="@{path}"
+                     regexp="^.+@(.+)$"
+                     select="\1"
+                     defaultValue="HEAD"
+                     if:blank="@{revision}"/>
+      <property name="revision" value="@{revision}"/>
+      
+      <local name="@{outputPropertyName}"/>
+      
+      <echo message="Performing Svn List with command: ${svn.executable} list --no-auth-cache --username @{username} --password *** @{path}@${revision} ${svnList.recursive} ${svnList.verbose} ${svnList.xml}"/>
+      <exec executable="${svn.executable}"
+            failonerror="true"
+            logerror="true"
+            outputproperty="@{outputPropertyName}">
+        <arg value="list"/>
+        <arg value="--no-auth-cache"/>
+        <arg value="--username"/>
+        <arg value="@{username}"/>
+        <arg value="--password"/>
+        <arg value="@{password}"/>
+        <arg value="@{path}@${revision}"/>
+        <arg line="${svnList.recursive} ${svnList.verbose} ${svnList.xml}"/>
+      </exec>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="svnUpdate">
+    <attribute name="path"/>
+    <attribute name="revision" default="HEAD"/>
+    <attribute name="failOnError" default="true"/>
+    <attribute name="depth" default="infinity"/>
+    <sequential>
+      <echo message="Performing Svn Update with command: ${svn.executable} update --no-auth-cache --username ${username} --password *** --depth @{depth} -r @{revision} @{path}"/>
+      <exec executable="${svn.executable}"
+            failonerror="@{failOnError}">
+        <arg value="update"/>
+        <arg value="--no-auth-cache"/>
+        <arg value="--username"/>
+        <arg value="${username}"/>
+        <arg value="--password"/>
+        <arg value="${password}"/>
+        <arg value="--depth"/>
+        <arg value="@{depth}"/>
+        <arg value="-r"/>
+        <arg value="@{revision}"/>
+        <arg value="@{path}"/>
+      </exec>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="svnRevert">
+    <attribute name="path"/>
+    <attribute name="failOnError" default="true"/>
+    <attribute name="depth" default="infinity"/>
+    <sequential>
+      <echo message="Performing Svn Revert with command: ${svn.executable} revert --depth @{depth} @{path}"/>
+      <exec executable="${svn.executable}"
+            failonerror="@{failOnError}">
+        <arg value="revert"/>
+        <arg value="--depth"/>
+        <arg value="@{depth}"/>
+        <arg value="@{path}"/>
+      </exec>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="svnUpdateCachedAuth">
+    <attribute name="path"/>
+    <attribute name="revision" default="HEAD"/>
+    <attribute name="failOnError" default="true"/>
+    <attribute name="depth" default="infinity"/>
+    <sequential>
+      <echo message="Performing Svn Update with command: ${svn.executable} update --depth @{depth} -r @{revision} @{path}"/>
+      <exec executable="${svn.executable}"
+            failonerror="@{failOnError}">
+        <arg value="update"/>
+        <arg value="--depth"/>
+        <arg value="@{depth}"/>
+        <arg value="-r"/>
+        <arg value="@{revision}"/>
+        <arg value="@{path}"/>
+      </exec>
+    </sequential>
+  </macrodef>
+</project>

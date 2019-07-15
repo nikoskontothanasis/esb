@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<psf version="2.0">
+  <provider id="antImportProjectSet">
+  <!-- The PROJECT_REFERENCES token is replaced with elements of the form:
+    <project reference="1.0,antImportProjectSet,X:/MyPath/MyProjectDirectory1,MyProjectName1"/>
+  -->
+@PROJECT_REFERENCES@
+  </provider>
+</psf>

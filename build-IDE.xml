@@ -1,0 +1,247 @@
+<project name="IntegrationDesignerBuild" basedir=".">
+  <property file="${basedir}/build.properties"/>
+  
+  <taskdef resource="net/sf/antcontrib/antlib.xml">
+    <classpath>
+      <pathelement location="${basedir}/additionalAntLibs/ant-contrib-1.0b3.jar"/>
+    </classpath>
+  </taskdef>
+  
+  <property environment="environmentProperties"/>
+  
+  <patternset id="jar.files.patternset"
+              excludes=".settings/**,.classpath,.project,**/*.java,bin/**,**/*.smap"/>
+  
+  <target name="init">
+    <failOnUndefinedProperty propertyName="projects.dir"/>
+    <failOnUndefinedProperty propertyName="project.names"/>
+    
+    <!-- Get the absolute paths of the workspace and the projects dir to compare them -->
+    <property name="workspace.absolute.path" location="${environmentProperties.WORKSPACE}"/>
+    <property name="projects.dir.absolute.path" location="${projects.dir}"/>
+    
+    <condition property="use.projects.dir.for.workspace">
+      <equals arg1="${workspace.absolute.path}" arg2="${projects.dir.absolute.path}"/>
+    </condition>
+    
+    <echo message="Processed projects: ${project.names}"/>
+    
+    <workspacePreferenceSet 
+      preferenceScope="instance" 
+      preferenceQualifier="org.eclipse.core.resources"
+      preferenceName="description.autobuilding" 
+      preferenceValue="false"
+      useEclipsePrefs="true"/>
+    <workspacePreferenceSet 
+      preferenceScope="instance" 
+      preferenceQualifier="org.eclipse.core.resources"
+      preferenceName="encoding"
+      preferenceValue="Cp1253"
+      useEclipsePrefs="true"/>
+    <workspacePreferenceSet 
+      preferenceScope="instance" 
+      preferenceQualifier="com.ibm.etools.j2ee.ant"
+      preferenceName="createUnknownProjects" 
+      preferenceValue="false"
+      useEclipsePrefs="true"/>
+  </target>
+  
+  <target name="print_time_message">
+    <tstamp>
+      <format property="current.time" pattern="HH:mm:ss"/>
+    </tstamp>
+      
+    <echo message="${current.time}: ${message}"/>
+  </target>
+  
+  <macrodef name="printTimeMessage">
+    <attribute name="message" default="Time"/>
+    <sequential>
+      <antcall target="print_time_message">
+        <param name="message" value="@{message}" />
+      </antcall>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="failOnUndefinedProperty">
+    <attribute name="propertyName"/>
+    <attribute name="allowEmptyProperty" default="false"/>
+    <attribute name="allowUnresolvedProperty" default="false"/>
+    <sequential>
+      <fail message="Property '@{propertyName}' is not set" unless="@{propertyName}"/>
+      
+      <fail message="Property '@{propertyName}' is empty">
+        <condition>
+          <and>
+            <isfalse value="@{allowEmptyProperty}"/>
+            <length string="${@{propertyName}}" trim="true" when="equal" length="0"/>
+          </and>
+        </condition>
+      </fail>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="stageProject">
+    <attribute name="projectName"/>
+    <sequential>
+      <printTimeMessage message="Staging project @{projectName}"/>
+      
+      <mkdir dir="${environmentProperties.WORKSPACE}/@{projectName}"/>
+      
+      <copy todir="${environmentProperties.WORKSPACE}/@{projectName}"
+            overwrite="true">
+        <fileset dir="${projects.dir}/@{projectName}">
+          <exclude name="**/*.class"/>
+          <exclude name="*/target/**"/>
+          <exclude name="*/gen/src/**"/>
+        </fileset>
+      </copy>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="importWorkspaceProject">
+    <attribute name="projectName"/>
+    <sequential>
+      <printTimeMessage message="Importing project: @{projectName}"/>
+      
+      <if> <istrue value="${use.projects.dir.for.workspace}"/>
+        <then>
+          <!--
+            http://www-01.ibm.com/support/docview.wss?uid=swg21592252:
+            The ant tasks projectSetImport and projectImport used in a headless (command line) build may lead to errors in a WebSphere Integration Developer environment.
+            To avoid these invalid errors you must use the ant task importProject which is described in the WID documentation.
+            http://publib.boulder.ibm.com/infocenter/dmndhelp/v6r2mx/topic/com.ibm.wbit.620.help.comptest.ui.doc/topics/rscriptaddtasks.html
+            Note the similarity between the ant task names projectImport and importProject. The former may lead to errors in WID and the latter does not.
+          -->
+          <importProject projectName="@{projectName}"/>
+        </then>
+        <else>          
+          <importProject projectName="@{projectName}"
+                         location="${projects.dir}/@{projectName}"/>
+        </else>
+      </if>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="buildWorkspaceProject">
+    <attribute name="projectName"/>
+    <sequential>
+      <printTimeMessage message="Building project: ${projects.dir}/@{projectName}"/>
+      <projectBuild projectName="@{projectName}"
+                    buildType="full"
+                    propertyCountName="@{projectName}.error.count"
+                    failOnError="false"/>
+      
+      <fail message="@{projectName}: Build failed due to build errors">
+        <condition>
+          <not>
+            <equals arg1="${@{projectName}.error.count}" arg2="0"/>
+          </not>
+        </condition>
+      </fail>
+    </sequential>
+  </macrodef>
+  
+  <macrodef name="exportDeploymentFile">
+    <attribute name="projectName"/>
+    <sequential>
+      <!-- Export ears for sca modules, and jars for other project types -->
+      <if> <available file="${environmentProperties.WORKSPACE}/@{projectName}/sca.module"/>
+        <then>
+          <printTimeMessage message="Exporting ear ${build.output.dir}/@{projectName}App.ear"/>
+          <earExport earExportFile="${build.output.dir}/@{projectName}App.ear"
+                     earProjectName="@{projectName}App"
+                     includeProjectMetaFiles="false"
+                     overwrite="true"
+                     exportSource="false"
+                     shared="false"
+                     failOnError="true"/>
+        </then>
+        <elseif> <istrue value="${build.jar.files}"/>
+          <then>
+            <printTimeMessage message="Exporting jar ${build.output.dir}/@{projectName}.jar"/>
+            
+            <!-- Get the output directory from the project's .classpath file.
+                 The xmltask library can also be used.
+            -->
+            <loadfile property="@{projectName}.output.dir"
+                      srcFile="${environmentProperties.WORKSPACE}/@{projectName}/.classpath">
+              <filterchain>
+                <tokenfilter>
+                  <filetokenizer/>
+                  <replaceregex pattern="[\r\n]+" replace=" " flags="g"/>
+                  <replaceregex pattern="&lt;!--.*?-->" replace=" " flags="g"/>
+                  <replaceregex pattern=".+&lt;classpathentry(\s+[^&lt;]*kind=&quot;output&quot;[^&lt;]*).*" replace="\1"/>
+                  <replaceregex pattern=".*path=&quot;([^&quot;]*).*" replace="\1"/>
+                  <replaceregex pattern="^\s*$" replace="."/>
+                </tokenfilter>
+              </filterchain>
+            </loadfile>
+            
+            <!-- If the jar file already exists, copy it to output (e.g. for jug-asl-2.0.0.jar) -->
+            <if> <available file="${environmentProperties.WORKSPACE}/@{projectName}/${@{projectName}.output.dir}/@{projectName}.jar"/>
+              <then>
+                <copy file="${environmentProperties.WORKSPACE}/@{projectName}/${@{projectName}.output.dir}/@{projectName}.jar"
+                      todir="${build.output.dir}"/>
+              </then>
+              <!-- If the manifest file exists, create jar file -->
+              <elseif> <available file="${environmentProperties.WORKSPACE}/@{projectName}/${@{projectName}.output.dir}/META-INF/MANIFEST.MF"/>
+                <then>
+                  <jar destfile="${build.output.dir}/@{projectName}.jar"
+                       basedir="${environmentProperties.WORKSPACE}/@{projectName}/${@{projectName}.output.dir}"
+                       manifest="${environmentProperties.WORKSPACE}/@{projectName}/${@{projectName}.output.dir}/META-INF/MANIFEST.MF"
+                       excludes=".settings/**,.classpath,.project,**/*.java,bin/**,**/*.smap">
+                    <patternset refid="jar.files.patternset"/>
+                  </jar>
+                </then>
+              </elseif>
+            </if>
+          </then>
+        </elseif>
+      </if>
+    </sequential>
+  </macrodef>
+  
+  <!-- Do not run the stage target when the projects dir is the same with the workspace -->
+  <target name="stage"
+          unless="${use.projects.dir.for.workspace}">
+    <for list="${project.names}"
+         param="projectName"
+         trim="true"
+         delimiter=",">
+      <sequential>
+        <stageProject projectName="@{projectName}"/>
+      </sequential>
+    </for>
+  </target>
+  
+  <!-- Add importProject calls for each project required to produce 
+       the build -->
+  <target name="import"
+          depends="init">
+    
+    <for list="${project.names}"
+         param="projectName"
+         trim="true"
+         delimiter=",">
+      <sequential>
+        <importWorkspaceProject projectName="@{projectName}"/>
+      </sequential>
+    </for>
+  </target>
+  
+  <target name="build"
+          depends="stage,import">
+    <failOnUndefinedProperty propertyName="build.output.dir"/>
+    
+    <for list="${project.names}"
+         param="projectName"
+         trim="true"
+         delimiter=",">
+      <sequential>
+        <buildWorkspaceProject projectName="@{projectName}"/>
+        <exportDeploymentFile projectName="@{projectName}"/>
+      </sequential>
+    </for>
+  </target>
+</project>
